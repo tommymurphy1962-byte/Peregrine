@@ -26,7 +26,7 @@ const DATA_DIR   = process.env.DATA_DIR || path.join(__dirname, '../data');
 const DB_PATH    = path.join(DATA_DIR, 'peregrine.db');
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const LOG_DIR    = path.join(DATA_DIR, 'logs');
-const BUILD_DIR  = path.join(__dirname, '../frontend/build');
+const BUILD_DIR  = path.join(__dirname);
 
 [DATA_DIR, UPLOAD_DIR, path.join(UPLOAD_DIR,'logos'), path.join(UPLOAD_DIR,'products'), LOG_DIR]
   .forEach(d => { try { fs.mkdirSync(d, { recursive:true }); } catch {} });
