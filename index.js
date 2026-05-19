@@ -66,6 +66,7 @@ app.use(cors({ origin:true, credentials:true }));
 app.use(express.json({ limit:'20mb' }));
 app.use(express.urlencoded({ extended:true }));
 app.use('/uploads', express.static(UPLOAD_DIR));
+app.use(express.static(BUILD_DIR));
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -615,18 +616,15 @@ async function sendInvoice(order){
   });
 }
 
-// ─── SERVE REACT ─────────────────────────────────────────────────────────────
-if(fs.existsSync(BUILD_DIR)){
-  app.use(express.static(BUILD_DIR));
-  app.get('*',(req,res)=>res.sendFile(path.join(BUILD_DIR,'index.html')));
-}else{
-  app.get('/',(req,res)=>res.json({status:'Backend running — frontend building…',health:'/api/health'}));
-}
-
 // ─── ERROR HANDLER ────────────────────────────────────────────────────────────
 app.use((err,req,res,next)=>{
   log('error',err.message);
   res.status(500).json({error:err.message||'Server error'});
+});
+
+// Serve index.html for all non-API routes (client-side routing)
+app.get('*', (req,res) => {
+  res.sendFile(path.join(BUILD_DIR, 'index.html'));
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
