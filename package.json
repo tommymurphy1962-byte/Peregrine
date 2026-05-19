@@ -2,12 +2,12 @@
   "name": "peregrine-portal",
   "version": "1.0.0",
   "description": "Peregrine Solutions Customer Portal",
-  "main": "server/index.js",
+  "main": "index.js",
   "scripts": {
-    "start":   "node server/index.js",
-    "dev":     "nodemon server/index.js",
-    "build":   "cd frontend && npm install && npm run build",
-    "db:init": "node server/db-init.js"
+    "start":   "node index.js",
+    "dev":     "nodemon index.js",
+    "build":   "echo 'No frontend build step'",
+    "db:init": "node db-init.js"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
