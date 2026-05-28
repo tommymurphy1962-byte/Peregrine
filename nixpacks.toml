@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "chromium", "nss", "atk", "cups", "xkbcommon", "pango", "cairo", "glib"]
+nixPkgs = ["nodejs_20", "chromium", "nss", "atk", "cups", "libxkbcommon", "pango", "cairo", "glib"]
 
 [phases.install]
 cmds = [
