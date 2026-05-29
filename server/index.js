@@ -250,6 +250,12 @@ app.post('/api/products', authMW, staffOnly, adminOnly, (req,res) => {
   res.json({ id:info.lastInsertRowid });
 });
 
+app.put('/api/products/bulk-activate', authMW, staffOnly, adminOnly, (req,res) => {
+  const active = req.body.active!==undefined ? (req.body.active?1:0) : 1;
+  const info = db.prepare(`UPDATE products SET active=?,updated_at=datetime('now')`).run(active);
+  res.json({ success:true, updated:info.changes });
+});
+
 app.put('/api/products/:id', authMW, staffOnly, adminOnly, (req,res) => {
   const p=req.body;
   db.prepare(`UPDATE products SET name=?,sku=?,description=?,category=?,base_price=?,is_quote_only=?,active=?,updated_at=datetime('now') WHERE id=?`)
@@ -771,9 +777,11 @@ async function runSync(vendor) {
       args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process'],
     });
 
+    // All vendors use web login (Playwright) — no API calls
     if (['asi_web','asi_esp'].includes(vendor.type)) {
       await syncASIEspPlus(vendor, creds, browser, stats);
     } else {
+      // sanmar, alphabroder, sns, custom_web — all use generic web scraper
       await syncGenericWeb(vendor, creds, browser, stats);
     }
 

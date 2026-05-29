@@ -141,7 +141,7 @@ function init(db) {
   // Seed default vendors
   const vendorSeeds = [
     { type:'asi_web',    name:'ASI ESP+',        method:'web', color:'#E37400', icon:'📦', time:'00:00' },
-    { type:'sanmar',     name:'SanMar',          method:'api', color:'#1E40AF', icon:'👕', time:'00:30' },
+    { type:'sanmar',     name:'SanMar',          method:'web', color:'#1E40AF', icon:'👕', time:'00:30' },
     { type:'custom_web', name:'Hanes Wholesale', method:'web', color:'#DC2626', icon:'🎽', time:'01:00' },
   ];
   for (const v of vendorSeeds) {

@@ -488,49 +488,119 @@ function Orders({orders,setOrders}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PRODUCTS & PRICING
 // ═══════════════════════════════════════════════════════════════════════════════
-function ProductPricing({products,setProducts}) {
-  const [sel,    setSel]    = useState(null);
-  const [form,   setForm]   = useState(null);
-  const [saved,  setSaved]  = useState(false);
+function ProductPricing() {
+  const [prods,   setProds]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search,  setSearch]  = useState('');
+  const [filter,  setFilter]  = useState('all'); // 'all' | 'active' | 'inactive'
+  const [sel,     setSel]     = useState(null);
+  const [form,    setForm]    = useState(null);
+  const [saved,   setSaved]   = useState(false);
+  const [bulkMsg, setBulkMsg] = useState('');
 
-  const openEdit = (p) => { setSel(p.id); setForm({...p,cost:String(p.cost),mVal:String(p.mVal)}); setSaved(false); };
-  const toggle   = (id) => setProducts(ps=>ps.map(p=>p.id===id?{...p,active:!p.active}:p));
+  const mapP = r => ({
+    id:r.id, name:r.name, sku:r.sku||'', cat:r.category||'Uncategorized',
+    cost:r.base_price||0, mType:'pct', mVal:40, setup:0, ship:0,
+    active:!!r.active, esp:!!r.is_quote_only, vendor:r.vendor_name||'',
+  });
 
-  const handleSave = () => {
-    setProducts(ps=>ps.map(p=>p.id===form.id?{...form,cost:parseFloat(form.cost)||0,mVal:parseFloat(form.mVal)||0}:p));
-    setSaved(true); setTimeout(()=>setSaved(false),1500);
+  const loadProducts = async () => {
+    setLoading(true);
+    try {
+      const data = await pgFetch('GET','/api/products');
+      setProds((Array.isArray(data)?data:[]).map(mapP));
+    } catch(e){ console.error('Products load failed:',e); }
+    finally { setLoading(false); }
   };
 
-  const pricing = form ? (() => {
+  useEffect(()=>{loadProducts();},[]);
+
+  const toggle = async (id) => {
+    const p = prods.find(x=>x.id===id); if(!p) return;
+    const next = !p.active;
+    setProds(ps=>ps.map(x=>x.id===id?{...x,active:next}:x));
+    try { await pgFetch('PUT',`/api/products/${id}`,{name:p.name,sku:p.sku,description:'',category:p.cat,base_price:p.cost,is_quote_only:p.esp?1:0,active:next?1:0}); }
+    catch { setProds(ps=>ps.map(x=>x.id===id?{...x,active:!next}:x)); }
+  };
+
+  const bulkActivate = async (activate) => {
+    setBulkMsg('Working…');
+    try {
+      await pgFetch('PUT','/api/products/bulk-activate',{active:activate?1:0});
+      setProds(ps=>ps.map(p=>({...p,active:activate})));
+      setBulkMsg(activate?`✓ All products activated`:`✓ All products deactivated`);
+    } catch(e){ setBulkMsg(`Error: ${e.message}`); }
+    setTimeout(()=>setBulkMsg(''),3000);
+  };
+
+  const openEdit = (p) => { setSel(p.id); setForm({...p,cost:String(p.cost),mVal:String(p.mVal)}); setSaved(false); };
+
+  const handleSave = async () => {
+    const updated = {...form, cost:parseFloat(form.cost)||0, mVal:parseFloat(form.mVal)||0};
+    try {
+      await pgFetch('PUT',`/api/products/${form.id}`,{name:updated.name,sku:updated.sku,description:'',category:updated.cat,base_price:updated.cost,is_quote_only:updated.esp?1:0,active:updated.active?1:0});
+      setProds(ps=>ps.map(p=>p.id===form.id?updated:p));
+      setSaved(true); setTimeout(()=>setSaved(false),1500);
+    } catch(e){ alert(`Save failed: ${e.message}`); }
+  };
+
+  const pricing = form ? (()=>{
     const c=parseFloat(form.cost)||0, v=parseFloat(form.mVal)||0;
     const markup = form.mType==='pct' ? c*(v/100) : v;
     return {markup, total:c+markup+parseFloat(form.setup||0)+parseFloat(form.ship||0)};
   })() : null;
 
+  const visible = prods.filter(p=>{
+    if(filter==='active'   && !p.active) return false;
+    if(filter==='inactive' && p.active)  return false;
+    if(search && !p.name.toLowerCase().includes(search.toLowerCase()) && !p.sku.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const inactive = prods.filter(p=>!p.active).length;
+
   return <div style={{display:'flex',height:'100%'}}>
     <div style={{flex:1,overflow:'auto',padding:22}}>
-      <div style={{...card(),overflow:'hidden',padding:0}}>
+      {/* Toolbar */}
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap'}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{...inp(),width:220,fontSize:12}}/>
+        {['all','active','inactive'].map(f=>(
+          <button key={f} onClick={()=>setFilter(f)} style={{padding:'6px 14px',borderRadius:6,border:'none',cursor:'pointer',fontSize:12,fontWeight:filter===f?700:400,background:filter===f?PER:'#1C1C28',color:filter===f?'#fff':T.sec}}>
+            {f==='all'?`All (${prods.length})`:f==='active'?`Active (${prods.filter(p=>p.active).length})`:`Inactive (${inactive})`}
+          </button>
+        ))}
+        <div style={{flex:1}}/>
+        {bulkMsg&&<span style={{fontSize:12,color:T.ok,fontWeight:600}}>{bulkMsg}</span>}
+        {inactive>0&&<button onClick={()=>bulkActivate(true)} style={{padding:'6px 16px',background:T.ok,border:'none',borderRadius:7,color:'#0B0B12',fontSize:12,fontWeight:700,cursor:'pointer'}}>
+          ✓ Activate All ({inactive})
+        </button>}
+        <button onClick={()=>bulkActivate(false)} style={{padding:'6px 14px',background:'#1C1C28',border:'none',borderRadius:7,color:T.sec,fontSize:12,cursor:'pointer'}}>Deactivate All</button>
+        <button onClick={loadProducts} style={{padding:'6px 12px',background:'#1C1C28',border:'none',borderRadius:7,color:T.sec,fontSize:12,cursor:'pointer'}}>↻ Refresh</button>
+      </div>
+
+      {loading&&<div style={{textAlign:'center',padding:40,color:T.sec,fontSize:13}}>Loading products…</div>}
+      {!loading&&prods.length===0&&<div style={{...card({textAlign:'center',padding:48})}}>
+        <div style={{fontSize:32,marginBottom:12}}>📦</div>
+        <div style={{fontSize:16,fontWeight:700,marginBottom:8}}>No products yet</div>
+        <div style={{fontSize:13,color:T.sec,marginBottom:16}}>Go to Vendor Sync → enter your ESP+ credentials → click Sync Now.</div>
+        <div style={{fontSize:12,color:T.dim}}>New products come in as <strong style={{color:T.acc}}>inactive</strong> so you can review before customers see them. Use "Activate All" to make them live.</div>
+      </div>}
+      {!loading&&visible.length>0&&<div style={{...card(),overflow:'hidden',padding:0}}>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
-          <thead><tr>{['Product','SKU','Category','Cost','Sale Price','Margin','Status',''].map(h=>(
+          <thead><tr>{['Product','SKU','Category','Vendor','Base Cost','Active',''].map(h=>(
             <th key={h} style={{textAlign:'left',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:T.dim,padding:'11px 14px',borderBottom:`1px solid ${T.border}`}}>{h}</th>
           ))}</tr></thead>
           <tbody>
-            {products.map((p,i)=>{
-              const price = p.esp ? null : parseFloat(calcP(p));
-              const cost  = p.cost||0;
-              const margin= cost>0&&price?((price-cost)/cost*100).toFixed(0):null;
-              return <tr key={p.id} style={{borderBottom:i<products.length-1?`1px solid ${T.border}`:'none',opacity:p.active?1:0.45}}>
+            {visible.map((p,i)=>(
+              <tr key={p.id} style={{borderBottom:i<visible.length-1?`1px solid ${T.border}`:'none',opacity:p.active?1:0.45}}>
                 <td style={{padding:'11px 14px'}}>
                   <div style={{fontSize:13,fontWeight:500,color:T.txt,marginBottom:2}}>{p.name}</div>
-                  {p.esp&&<span style={{fontSize:9,fontWeight:700,background:T.aD,color:T.acc,borderRadius:4,padding:'1px 5px'}}>ESP+</span>}
+                  {p.esp&&<span style={{fontSize:9,fontWeight:700,background:T.aD,color:T.acc,borderRadius:4,padding:'1px 5px'}}>Quote Only</span>}
                 </td>
                 <td style={{padding:'11px 14px',fontSize:11,fontFamily:'monospace',color:T.sec}}>{p.sku}</td>
                 <td style={{padding:'11px 14px',fontSize:12,color:T.sec}}>{p.cat}</td>
-                <td style={{padding:'11px 14px',fontSize:13}}>{p.esp?'—':`$${p.cost.toFixed(2)}`}</td>
-                <td style={{padding:'11px 14px'}}>
-                  {p.esp?<span style={{fontSize:12,color:T.acc}}>Quote only</span>:<span style={{fontSize:13,fontWeight:600,color:T.txt}}>${price}</span>}
-                </td>
-                <td style={{padding:'11px 14px',fontSize:13,color:p.esp?T.dim:T.ok}}>{p.esp?'—':margin?`${margin}%`:'—'}</td>
+                <td style={{padding:'11px 14px',fontSize:11,color:T.dim}}>{p.vendor}</td>
+                <td style={{padding:'11px 14px',fontSize:13}}>{p.cost>0?`$${p.cost.toFixed(2)}`:'—'}</td>
                 <td style={{padding:'11px 14px'}}>
                   <div onClick={()=>toggle(p.id)} style={{width:34,height:19,borderRadius:10,background:p.active?`${T.ok}33`:'#1C1C28',border:`1px solid ${p.active?T.ok:T.b2}`,cursor:'pointer',position:'relative',transition:'all .2s'}}>
                     <div style={{position:'absolute',top:3,left:p.active?16:3,width:11,height:11,borderRadius:'50%',background:p.active?T.ok:T.dim,transition:'left .2s'}}/>
@@ -539,11 +609,11 @@ function ProductPricing({products,setProducts}) {
                 <td style={{padding:'11px 14px'}}>
                   <button onClick={()=>openEdit(p)} style={{background:'#1C1C28',border:'none',borderRadius:6,color:T.sec,fontSize:12,cursor:'pointer',padding:'5px 12px'}}>Edit</button>
                 </td>
-              </tr>;
-            })}
+              </tr>
+            ))}
           </tbody>
         </table>
-      </div>
+      </div>}
     </div>
 
     {/* Edit panel */}
@@ -1507,12 +1577,11 @@ function CustomerPortal() {
 // VENDOR SYNC
 // ═══════════════════════════════════════════════════════════════════════════════
 const VENDOR_TYPES_V=[
-  {id:'asi_api',label:'ASI ESP+ API',icon:'📦',method:'api',color:'#E37400',desc:'Official ASI distributor API — pulls product data, pricing, images on schedule'},
-  {id:'sanmar',label:'SanMar',icon:'👕',method:'api',color:'#1E40AF',desc:'SanMar PromoStandards API for apparel & accessories'},
-  {id:'alphabroder',label:'alphabroder',icon:'🧢',method:'api',color:'#7C3AED',desc:'alphabroder / Prime Line product feed'},
-  {id:'sns',label:'S&S Activewear',icon:'⚡',method:'api',color:'#059669',desc:'S&S Activewear product & inventory API'},
-  {id:'custom_api',label:'Custom API Vendor',icon:'⚙️',method:'api',color:T.pur,desc:'Any vendor with a REST or XML product data API'},
-  {id:'custom_web',label:'Custom Web Vendor',icon:'🔐',method:'web',color:T.sec,desc:'Any vendor with a web login portal — headless browser scrape'},
+  {id:'asi_web',   label:'ASI ESP+',        icon:'📦',method:'web',color:'#E37400',desc:'Log in to esp.asicentral.com — scrapes cups, koozies, pens, toys, coolers, hats & bags'},
+  {id:'sanmar',    label:'SanMar',          icon:'👕',method:'web',color:'#1E40AF',desc:'Log in to sanmar.com — headless browser scrapes apparel & accessories catalog'},
+  {id:'alphabroder',label:'alphabroder',   icon:'🧢',method:'web',color:'#7C3AED',desc:'Log in to alphabroder.com — scrapes full product catalog'},
+  {id:'sns',       label:'S&S Activewear', icon:'⚡',method:'web',color:'#059669',desc:'Log in to ssactivewear.com — scrapes activewear & accessories'},
+  {id:'custom_web',label:'Other Vendor',   icon:'🔐',method:'web',color:T.sec,    desc:'Any vendor with a web login portal — Playwright logs in and scrapes products'},
 ];
 
 const INIT_VENDORS=[
