@@ -94,7 +94,7 @@ app.get('/api/health', (req,res) => res.json({ ok:true, uptime:Math.round(proces
 // ─── SETUP STATUS (drives first-run wizard in frontend) ───────────────────────
 app.get('/api/setup/status', (req,res) => {
   const cfg = {
-    hasAdmin:   !!db.prepare('SELECT id FROM staff_users WHERE role="super_admin" LIMIT 1').get(),
+    hasAdmin:   !!db.prepare("SELECT id FROM staff_users WHERE role='super_admin' LIMIT 1").get(),
     hasDomain:  !!process.env.BASE_DOMAIN,
     hasAI:      !!process.env.ANTHROPIC_API_KEY,
     hasEmail:   !!process.env.SMTP_USER,

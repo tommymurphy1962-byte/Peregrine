@@ -13,6 +13,16 @@ const PER = '#DA532C'; // Peregrine brand orange
 
 const inp = (extra={}) => ({ background:T.bg, border:`1px solid ${T.b2}`, borderRadius:7, padding:'8px 12px', color:T.txt, fontSize:13, outline:'none', width:'100%', boxSizing:'border-box', ...extra });
 const lbl = { display:'block', fontSize:10, fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:T.sec, marginBottom:5 };
+
+// ─── API HELPER (reads JWT from localStorage, same key App.js uses) ───────────
+const pgFetch = (method, url, body) => {
+  const tok = localStorage.getItem('pg_tok') || '';
+  return fetch(url, {
+    method,
+    headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${tok}` },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  }).then(r => r.json().then(d => { if(!r.ok) throw new Error(d.error||r.statusText); return d; }));
+};
 const card = (extra={}) => ({ background:T.surf, border:`1px solid ${T.border}`, borderRadius:12, padding:18, ...extra });
 const pill = (on, color=T.acc) => ({ padding:'5px 12px', borderRadius:6, fontSize:11, fontWeight:600, cursor:'pointer', border:'none', background: on ? color : '#1C1C28', color: on ? (color===T.acc?'#0B0B12':T.txt) : T.sec, transition:'all .12s' });
 
@@ -1543,55 +1553,168 @@ const SYNC_LOGS=[
 ];
 
 function VendorSync() {
-  const [vendors,  setVendors]  = useState(INIT_VENDORS);
-  const [selV,     setSelV]     = useState(1);
-  const [vtab,     setVtab]     = useState('connections');
-  const [syncing,  setSyncing]  = useState({});
-  const [pct,      setPct]      = useState({});
-  const [testR,    setTestR]    = useState({});
-  const [addStep,  setAddStep]  = useState(1);
-  const [addType,  setAddType]  = useState(null);
-  const [addForm,  setAddForm]  = useState({name:'',time:'00:00',days:['mon','tue','wed','thu','fri','sat','sun']});
-  const [addDone,  setAddDone]  = useState(false);
-  const [saved,    setSaved]    = useState({});
+  const [vendors,   setVendors]   = useState([]);
+  const [selV,      setSelV]      = useState(null);
+  const [vtab,      setVtab]      = useState('connections');
+  const [syncing,   setSyncing]   = useState({});
+  const [pct,       setPct]       = useState({});
+  const [testR,     setTestR]     = useState({});
+  const [addStep,   setAddStep]   = useState(1);
+  const [addType,   setAddType]   = useState(null);
+  const [addForm,   setAddForm]   = useState({name:'',time:'00:00',days:['mon','tue','wed','thu','fri','sat','sun']});
+  const [addDone,   setAddDone]   = useState(false);
+  const [saved,     setSaved]     = useState({});
+  const [credForms, setCredForms] = useState({});
+  const [syncLogs,  setSyncLogs]  = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const intervals   = useRef({});
+
+  const CRED_DEFAULTS = {
+    asi_web:    {login_url:'https://esp.asicentral.com/',username:'',password:''},
+    asi_api:    {api_key:'',member_id:'',base_url:'https://api.asicentral.com/v1/'},
+    sanmar:     {api_key:'',account_id:'',endpoint:'https://api.sanmar.com/promostandards/'},
+    sns:        {api_key:'',account_id:'',endpoint:'https://api.ssactivewear.com/v2/'},
+    alphabroder:{api_key:'',account_id:'',endpoint:''},
+    custom_web: {login_url:'',username:'',password:'',selector_username:'',selector_password:'',selector_submit:''},
+    custom_api: {endpoint:'',api_key:'',account_id:''},
+  };
+
+  const mapV = r => ({
+    id:r.id, type:r.type, name:r.name, method:r.method||'web',
+    color:r.color||'#888', icon:r.icon||'📦', active:!!r.active,
+    connected:!!r.connected, totalProducts:r.total_products||0, syncCount:r.sync_count||0,
+    schedule:{enabled:!!r.schedule_enabled, time:r.schedule_time||'00:00', days:(r.schedule_days||'mon,tue,wed,thu,fri,sat,sun').split(',')},
+    lastSync:r.last_sync_at?{
+      date:new Date(r.last_sync_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}),
+      status:r.last_sync_status||'unknown', added:0,updated:0,removed:0,errors:0,duration:'—',
+    }:null,
+    dataFields:['name','sku','category','price','supplier','colors','sizes','images','min_qty'],
+    creds:CRED_DEFAULTS[r.type]||CRED_DEFAULTS.custom_web,
+  });
+
+  const loadVendors = async () => {
+    setLoading(true);
+    try {
+      const data = await pgFetch('GET','/api/vendors');
+      const mapped = (Array.isArray(data)?data:[]).map(mapV);
+      setVendors(mapped);
+      setSelV(id => id || (mapped[0]?.id || null));
+      setCredForms(f => { const n={...f}; mapped.forEach(v=>{ if(!n[v.id]) n[v.id]={...v.creds}; }); return n; });
+    } catch(e) { console.error('Vendors load failed:',e); }
+    finally { setLoading(false); }
+  };
+
+  const loadSyncLogs = async () => {
+    try {
+      const all=[];
+      for(const vx of vendors){
+        try {
+          const vd=await pgFetch('GET',`/api/vendors/${vx.id}`);
+          (vd.logs||[]).forEach(l=>all.push({
+            vendor:vx.name,
+            date:new Date(l.started_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}),
+            status:l.status, added:l.added||0, updated:l.updated||0, removed:l.removed||0, errors:l.errors||0,
+            duration:l.duration_ms?`${Math.round(l.duration_ms/60000)}m ${Math.round((l.duration_ms%60000)/1000)}s`:'—',
+          }));
+        } catch {}
+      }
+      all.sort((a,b)=>new Date(b.date)-new Date(a.date));
+      setSyncLogs(all);
+    } catch {}
+  };
+
+  useEffect(()=>{loadVendors();},[]);
+  useEffect(()=>{ if(vtab==='logs'&&vendors.length>0) loadSyncLogs(); },[vtab]);
 
   const v = vendors.find(x=>x.id===selV);
+  const vtabBtn = t=>({padding:'8px 16px',borderRadius:7,fontSize:12,fontWeight:vtab===t?600:400,cursor:'pointer',border:'none',whiteSpace:'nowrap',background:vtab===t?'#1E1E2C':'transparent',color:vtab===t?T.acc:T.sec,transition:'all .12s'});
 
-  const vtabBtn = t => ({padding:'8px 16px',borderRadius:7,fontSize:12,fontWeight:vtab===t?600:400,cursor:'pointer',border:'none',whiteSpace:'nowrap',background:vtab===t?'#1E1E2C':'transparent',color:vtab===t?T.acc:T.sec,transition:'all .12s'});
-
-  const runSync = id => {
-    setSyncing(s=>({...s,[id]:true})); setPct(p=>({...p,[id]:0}));
-    const iv=setInterval(()=>{
-      setPct(p=>{
-        const cur=p[id]||0;
-        if(cur>=100){
-          clearInterval(iv); setSyncing(s=>({...s,[id]:false}));
-          setVendors(vs=>vs.map(x=>x.id===id?{...x,lastSync:{date:'Just now',status:'success',added:Math.floor(Math.random()*50),updated:Math.floor(Math.random()*200)+50,removed:Math.floor(Math.random()*8),errors:0,duration:'3m 42s'}}:x));
-          return {...p,[id]:100};
-        }
-        return {...p,[id]:Math.min(100,cur+Math.random()*9)};
-      });
-    },180);
+  const runSync = async id => {
+    setSyncing(s=>({...s,[id]:true})); setPct(p=>({...p,[id]:3}));
+    try {
+      await pgFetch('POST',`/api/vendors/${id}/sync`,{});
+      intervals.current[id]=setInterval(async()=>{
+        setPct(p=>({...p,[id]:Math.min(88,(p[id]||3)+Math.random()*3)}));
+        try {
+          const vd=await pgFetch('GET',`/api/vendors/${id}`);
+          const latest=(vd.logs||[])[0];
+          if(latest&&latest.status!=='running'){
+            clearInterval(intervals.current[id]);
+            setPct(p=>({...p,[id]:100}));
+            setTimeout(()=>{setSyncing(s=>({...s,[id]:false}));setPct(p=>({...p,[id]:0}));},1200);
+            setVendors(vs=>vs.map(x=>x.id===id?{...x,
+              totalProducts:vd.total_products||x.totalProducts, syncCount:vd.sync_count||x.syncCount, connected:!!vd.connected,
+              lastSync:{date:'Just now',status:latest.status,added:latest.added||0,updated:latest.updated||0,removed:latest.removed||0,errors:latest.errors||0,
+                duration:latest.duration_ms?`${Math.round(latest.duration_ms/60000)}m ${Math.round((latest.duration_ms%60000)/1000)}s`:'—'},
+            }:x));
+          }
+        } catch {}
+      },8000);
+    } catch(e) {
+      clearInterval(intervals.current[id]);
+      setSyncing(s=>({...s,[id]:false}));
+      alert(`Sync failed: ${e.message}`);
+    }
   };
 
-  const testConn = id => {
+  const testConn = async id => {
     setTestR(r=>({...r,[id]:'testing'}));
-    setTimeout(()=>setTestR(r=>({...r,[id]:'ok'})),1800);
-    setTimeout(()=>setTestR(r=>({...r,[id]:null})),5000);
+    try {
+      await pgFetch('POST',`/api/vendors/${id}/test`,{});
+      setTestR(r=>({...r,[id]:'ok'}));
+      setVendors(vs=>vs.map(x=>x.id===id?{...x,connected:true}:x));
+      setTimeout(()=>setTestR(r=>({...r,[id]:null})),4000);
+    } catch(e) {
+      setTestR(r=>({...r,[id]:'fail'}));
+      setTimeout(()=>setTestR(r=>({...r,[id]:null})),5000);
+      alert(`Test failed: ${e.message}`);
+    }
   };
 
-  const saveV    = id => { setSaved(s=>({...s,[id]:true})); setTimeout(()=>setSaved(s=>({...s,[id]:false})),2000); };
-  const toggleV  = id => setVendors(vs=>vs.map(x=>x.id===id?{...x,active:!x.active}:x));
-  const toggleDay= (id,d) => setVendors(vs=>vs.map(x=>x.id===id?{...x,schedule:{...x.schedule,days:x.schedule.days.includes(d)?x.schedule.days.filter(y=>y!==d):[...x.schedule.days,d]}}:x));
-  const addDay   = d => setAddForm(f=>({...f,days:f.days.includes(d)?f.days.filter(x=>x!==d):[...f.days,d]}));
+  const saveV = async id => {
+    const creds=credForms[id]||{};
+    if(!Object.values(creds).some(v=>v&&String(v).trim())){alert('Enter your credentials first');return;}
+    try {
+      await pgFetch('PUT',`/api/vendors/${id}`,{credentials:creds});
+      setSaved(s=>({...s,[id]:true}));
+      setVendors(vs=>vs.map(x=>x.id===id?{...x,connected:true}:x));
+      setTimeout(()=>setSaved(s=>({...s,[id]:false})),2500);
+    } catch(e) { alert(`Save failed: ${e.message}`); }
+  };
 
-  const completeAdd = () => {
+  const toggleV = async id => {
+    const cur=vendors.find(x=>x.id===id); const next=!cur.active;
+    setVendors(vs=>vs.map(x=>x.id===id?{...x,active:next}:x));
+    try { await pgFetch('PUT',`/api/vendors/${id}`,{active:next?1:0,name:cur.name}); }
+    catch { setVendors(vs=>vs.map(x=>x.id===id?{...x,active:!next}:x)); }
+  };
+
+  const toggleDay=(id,d)=>setVendors(vs=>vs.map(x=>x.id===id?{...x,schedule:{...x.schedule,days:x.schedule.days.includes(d)?x.schedule.days.filter(y=>y!==d):[...x.schedule.days,d]}}:x));
+  const addDay=d=>setAddForm(f=>({...f,days:f.days.includes(d)?f.days.filter(x=>x!==d):[...f.days,d]}));
+
+  const saveSchedule = async id => {
+    const cur=vendors.find(x=>x.id===id);
+    try {
+      await pgFetch('PUT',`/api/vendors/${id}`,{name:cur.name,schedule_enabled:cur.schedule.enabled?1:0,schedule_time:cur.schedule.time,schedule_days:cur.schedule.days.join(',')});
+      setSaved(s=>({...s,[`s${id}`]:true}));
+      setTimeout(()=>setSaved(s=>({...s,[`s${id}`]:false})),2000);
+    } catch(e) { alert(`Schedule save failed: ${e.message}`); }
+  };
+
+  const completeAdd = async () => {
     const type=VENDOR_TYPES_V.find(t=>t.id===addType);
-    setVendors(vs=>[...vs,{id:Math.max(...vs.map(x=>x.id))+1,type:addType,name:addForm.name||type?.label,active:true,connected:false,method:type?.method||'api',color:type?.color||T.sec,icon:type?.icon||'📦',creds:{},schedule:{enabled:true,time:addForm.time,days:addForm.days},lastSync:null,totalProducts:0,syncCount:0,dataFields:['name','sku','price']}]);
-    setAddDone(true);
+    const creds=addType==='custom_api'
+      ?{endpoint:addForm.endpoint||'',api_key:addForm.apiKey||'',account_id:addForm.account||''}
+      :{login_url:addForm.loginUrl||'',username:addForm.username||'',password:addForm.password||'',selector_username:addForm.selUser||'',selector_password:addForm.selPass||''};
+    try {
+      await pgFetch('POST','/api/vendors',{type:addType,name:addForm.name||type?.label,method:type?.method||'web',color:type?.color||T.sec,icon:type?.icon||'📦',credentials:creds,schedule_enabled:1,schedule_time:addForm.time,schedule_days:addForm.days.join(',')});
+      await loadVendors(); setAddDone(true);
+    } catch(e) { alert(`Add vendor failed: ${e.message}`); }
   };
 
-  const SC={success:T.ok,warning:T.acc,error:T.bad};
+  if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:T.sec,fontSize:13}}>Loading vendors…</div>;
+
+  const SC={success:T.ok,warning:T.acc,error:T.bad,running:T.inf};
 
   return <div style={{display:'flex',height:'100%',flexDirection:'column'}}>
     {/* Sub-header */}
@@ -1714,10 +1837,13 @@ function VendorSync() {
             </div>}
 
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
-              {Object.entries(v.creds).map(([key,val])=>(
+              {Object.keys(credForms[v.id]||v.creds||{}).map(key=>(
                 <div key={key}>
-                  <label style={T.lbl||lbl}>{key.replace(/_/g,' ')}</label>
-                  <input style={inp()} type={key.includes('key')||key.includes('password')||key.includes('secret')?'password':'text'} defaultValue={val} placeholder={key==='login_url'?'https://vendor.com/login':key.includes('selector')?'e.g. #username':key}/>
+                  <label style={lbl}>{key.replace(/_/g,' ')}</label>
+                  <input style={inp()} type={key.includes('key')||key.includes('password')||key.includes('secret')?'password':'text'}
+                    value={credForms[v.id]?.[key]||''}
+                    onChange={e=>setCredForms(f=>({...f,[v.id]:{...(f[v.id]||{}), [key]:e.target.value}}))}
+                    placeholder={key==='login_url'?'https://vendor.com/login':key.includes('selector')?'e.g. #email':key==='username'?'your@email.com':key}/>
                 </div>
               ))}
             </div>
@@ -1729,7 +1855,17 @@ function VendorSync() {
 
           {/* Schedule for this vendor */}
           <div style={{...card({marginTop:14})}}>
-            <div style={{fontSize:13,fontWeight:600,marginBottom:14}}>Sync Schedule</div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+              <div style={{fontSize:13,fontWeight:600}}>Sync Schedule</div>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                {saved[`s${v.id}`]&&<span style={{fontSize:12,color:T.ok,fontWeight:600}}>✓ Schedule saved</span>}
+                <div onClick={()=>setVendors(vs=>vs.map(x=>x.id===v.id?{...x,schedule:{...x.schedule,enabled:!x.schedule.enabled}}:x))}
+                  style={{width:40,height:22,borderRadius:11,background:v.schedule.enabled?`${T.ok}33`:'#1C1C28',border:`1px solid ${v.schedule.enabled?T.ok:T.b2}`,cursor:'pointer',position:'relative'}}>
+                  <div style={{position:'absolute',top:3,left:v.schedule.enabled?19:3,width:14,height:14,borderRadius:'50%',background:v.schedule.enabled?T.ok:T.dim,transition:'left .2s'}}/>
+                </div>
+                <button onClick={()=>saveSchedule(v.id)} style={{padding:'6px 14px',background:T.acc,border:'none',borderRadius:7,color:'#0B0B12',fontSize:12,fontWeight:700,cursor:'pointer'}}>Save Schedule</button>
+              </div>
+            </div>
             <div style={{display:'grid',gridTemplateColumns:'140px 1fr',gap:12}}>
               <div>
                 <label style={lbl}>Run Time</label>
@@ -1803,9 +1939,10 @@ function VendorSync() {
               <th key={h} style={{textAlign:'left',fontSize:10,fontWeight:700,letterSpacing:'0.08em',textTransform:'uppercase',color:T.dim,padding:'11px 14px',borderBottom:`1px solid ${T.border}`}}>{h}</th>
             ))}</tr></thead>
             <tbody>
-              {SYNC_LOGS.map((log,i)=>{
+              {syncLogs.length===0&&<tr><td colSpan={8} style={{padding:'28px 14px',textAlign:'center',color:T.dim,fontSize:12}}>No sync history yet — run your first sync to see logs here.</td></tr>}
+              {syncLogs.map((log,i)=>{
                 const sc=SC[log.status]||T.sec;
-                return <tr key={i} style={{borderBottom:i<SYNC_LOGS.length-1?`1px solid ${T.border}`:'none'}}>
+                return <tr key={i} style={{borderBottom:i<syncLogs.length-1?`1px solid ${T.border}`:'none'}}>
                   <td style={{padding:'11px 14px',fontSize:13,fontWeight:500}}>{log.vendor}</td>
                   <td style={{padding:'11px 14px',fontSize:11,color:T.sec}}>{log.date}</td>
                   <td style={{padding:'11px 14px'}}><span style={{fontSize:11,fontWeight:600,background:`${sc}15`,color:sc,borderRadius:5,padding:'2px 8px'}}>{log.status}</span></td>
