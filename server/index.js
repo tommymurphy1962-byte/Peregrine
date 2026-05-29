@@ -523,62 +523,274 @@ app.post('/api/upload/logo/:cId', authMW, staffOnly, upload.single('logo'), (req
 });
 
 // ─── SCRAPER ─────────────────────────────────────────────────────────────────
-async function runSync(vendor){
-  const logId=db.prepare("INSERT INTO vendor_sync_logs (vendor_id,status,started_at) VALUES (?,'running',datetime('now'))").run(vendor.id).lastInsertRowid;
-  const stats={added:0,updated:0,removed:0,errors:0};
-  let browser;
-  try{
-    const creds=JSON.parse(dec(vendor.credentials_enc));
-    const {chromium}=require('playwright');
-    browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
-    const ctx=await browser.newContext({userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'});
-    const page=await ctx.newPage();
-    log('info',`Sync: ${vendor.name} logging in…`);
-    await page.goto(creds.login_url,{waitUntil:'networkidle',timeout:30000});
-    if(creds.selector_username&&creds.username) await page.fill(creds.selector_username,creds.username).catch(()=>{});
-    if(creds.selector_password&&creds.password) await page.fill(creds.selector_password,creds.password).catch(()=>{});
-    if(creds.selector_submit) await page.click(creds.selector_submit).catch(()=>{});
-    await page.waitForNavigation({waitUntil:'networkidle',timeout:15000}).catch(()=>{});
-    log('info',`Sync: ${vendor.name} logged in, scraping catalog…`);
-    if(creds.catalog_url){
-      await page.goto(creds.catalog_url,{waitUntil:'networkidle',timeout:30000});
-      let hasMore=true,pageNum=1;
-      while(hasMore&&pageNum<=500){
-        await page.waitForTimeout(parseInt(process.env.SCRAPER_DELAY_MS)||1500);
-        const items=await page.evaluate(sel=>{
-          const els=document.querySelectorAll(sel||'.product-item,.product,.item,[data-product-id]');
-          return Array.from(els).map(el=>({
-            name:        el.querySelector('.name,.title,.product-name,h2,h3')?.textContent?.trim(),
-            sku:         el.querySelector('.sku,.item-number,.product-number,[data-sku]')?.textContent?.trim(),
-            price:       parseFloat(el.querySelector('.price,[data-price]')?.textContent?.replace(/[^0-9.]/g,'')||0)||null,
-            description: el.querySelector('.description,.summary,p')?.textContent?.trim()?.slice(0,500),
-            image:       el.querySelector('img[src]:not([src=""])')?.src,
-            category:    el.querySelector('.category,.product-category')?.textContent?.trim(),
-          })).filter(p=>p.name&&p.name.length>1);
-        },creds.product_selector||null);
-        for(const p of items){
-          try{
-            const sku=(p.sku||'').trim()||(vendor.id+'-'+p.name.slice(0,20).replace(/\W+/g,'-').toLowerCase());
-            const ex=db.prepare('SELECT id FROM products WHERE sku=? AND vendor_id=?').get(sku,vendor.id);
-            if(ex){db.prepare("UPDATE products SET name=?,base_price=?,description=?,category=?,updated_at=datetime('now') WHERE id=?").run(p.name,p.price,p.description,p.category,ex.id);stats.updated++;}
-            else  {db.prepare("INSERT INTO products (vendor_id,name,sku,base_price,description,category,images,active,last_synced_at) VALUES (?,?,?,?,?,?,?,0,datetime('now'))").run(vendor.id,p.name,sku,p.price,p.description,p.category,JSON.stringify(p.image?[p.image]:[]));stats.added++;}
-          }catch(e){stats.errors++;}
+
+// ASI ESP+ — the 7 categories to sync (edit labels/search terms here anytime)
+const ESP_CATEGORIES = [
+  { search: 'cups tumblers mugs drinkware',          label: 'Cups/Drinkware', dbCategory: 'Drinkware'  },
+  { search: 'koozie can cooler insulator sleeve',     label: 'Koozies',        dbCategory: 'Koozies'    },
+  { search: 'pens writing instruments stylus pencil', label: 'Pens',           dbCategory: 'Pens'       },
+  { search: 'toys games fidget stress ball stuffed',  label: 'Toys',           dbCategory: 'Toys'       },
+  { search: 'cooler ice chest beverage soft-sided',   label: 'Coolers',        dbCategory: 'Coolers'    },
+  { search: 'hats caps headwear beanie visor trucker',label: 'Hats/Headwear',  dbCategory: 'Hats'       },
+  { search: 'bags totes backpack drawstring duffel',  label: 'Bags/Totes',     dbCategory: 'Bags'       },
+];
+
+const MAX_PER_CATEGORY = parseInt(process.env.ESP_MAX_PER_CAT) || 25000;
+const SCRAPER_DELAY    = parseInt(process.env.SCRAPER_DELAY_MS) || 1500;
+
+// Batch upsert — wraps 1 000 rows in a single SQLite transaction (100× faster than one-at-a-time)
+function batchUpsert(vendor, products) {
+  let added = 0, updated = 0, errors = 0;
+  const insertStmt = db.prepare(
+    "INSERT INTO products (vendor_id,name,sku,base_price,description,category,supplier_name,images,colors,sizes,min_qty,active,last_synced_at) " +
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,datetime('now'))"
+  );
+  const updateStmt = db.prepare(
+    "UPDATE products SET name=?,base_price=?,description=?,category=?,supplier_name=?,images=?,colors=?,sizes=?,min_qty=?,updated_at=datetime('now') WHERE id=?"
+  );
+  const checkStmt = db.prepare('SELECT id FROM products WHERE sku=? AND vendor_id=?');
+
+  const runBatch = db.transaction((items) => {
+    for (const p of items) {
+      try {
+        const sku = (p.sku||'').trim() || `${vendor.id}-${(p.name||'').slice(0,30).replace(/\W+/g,'-').toLowerCase()}`;
+        if (!sku || !p.name) continue;
+        const imgs = JSON.stringify(Array.isArray(p.images) ? p.images.slice(0,3) : (p.images ? [p.images] : []));
+        const ex = checkStmt.get(sku, vendor.id);
+        if (ex) {
+          updateStmt.run(p.name, p.price||null, (p.description||'').slice(0,500), p.category, p.supplier||null, imgs, p.colors||null, p.sizes||null, p.min_qty||1, ex.id);
+          updated++;
+        } else {
+          insertStmt.run(vendor.id, p.name, sku, p.price||null, (p.description||'').slice(0,500), p.category, p.supplier||null, imgs, p.colors||null, p.sizes||null, p.min_qty||1);
+          added++;
         }
-        const next=await page.$('a[rel="next"],.next-page,.pagination-next:not(.disabled)').catch(()=>null);
-        if(next&&items.length>0){await next.click();await page.waitForNavigation({timeout:10000}).catch(()=>{});pageNum++;}
-        else hasMore=false;
-      }
+      } catch(e) { errors++; }
     }
+  });
+
+  // Process in chunks of 1 000
+  for (let i = 0; i < products.length; i += 1000) {
+    runBatch(products.slice(i, i + 1000));
+  }
+  return { added, updated, errors };
+}
+
+// ─── ASI ESP+ SCRAPER ────────────────────────────────────────────────────────
+async function syncASIEspPlus(vendor, creds, browser, stats) {
+  const ctx = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport:  { width: 1280, height: 900 },
+  });
+  const page = await ctx.newPage();
+
+  // ── Log in ──────────────────────────────────────────────────────────────────
+  const loginUrl = creds.login_url || 'https://esp.asicentral.com/';
+  log('info', `ESP+ → ${loginUrl}`);
+  await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+  // Try a broad set of selectors so this survives minor site redesigns
+  const tryFill = async (selectors, value) => {
+    for (const s of selectors) {
+      try { const el = await page.$(s); if (el) { await page.fill(s, value); return; } } catch {}
+    }
+  };
+  const tryClick = async (selectors) => {
+    for (const s of selectors) {
+      try { const el = await page.$(s); if (el) { await page.click(s); return; } } catch {}
+    }
+  };
+
+  await tryFill(['input[type="email"]','input[name="email"]','input[name="username"]','input[name="UsernameOrEmail"]','#email','#username'], creds.username);
+  await tryFill(['input[type="password"]','input[name="password"]','#password'], creds.password);
+  await tryClick(['button[type="submit"]','input[type="submit"]','.btn-primary','[class*="login"] button','button:has-text("Sign In")','button:has-text("Log In")','button:has-text("Login")']);
+  await page.waitForTimeout(3000);
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  if (page.url().toLowerCase().match(/login|signin|sign-in/)) {
+    throw new Error('ESP+ login failed — verify username/password in vendor settings');
+  }
+  log('info', `ESP+ logged in ✓ (${page.url()})`);
+
+  // ── Scrape each category ────────────────────────────────────────────────────
+  for (const cat of ESP_CATEGORIES) {
+    let catTotal = 0, pageNum = 1, hasMore = true;
+    log('info', `ESP+ category: ${cat.label}`);
+
+    // Listen for JSON API responses (fast path — avoids HTML parsing entirely)
+    const intercepted = [];
+    let apiHits = 0;
+    const onResponse = async (resp) => {
+      const url = resp.url();
+      if (resp.status() !== 200) return;
+      const ct = resp.headers()['content-type'] || '';
+      if (!ct.includes('json')) return;
+      if (!url.match(/searchengine\.asicentral\.com|\/api\/(search|product|esp)/i)) return;
+      try {
+        const j = await resp.json();
+        const items = j.Products || j.products || j.Results || j.results || j.Data || j.data || [];
+        if (Array.isArray(items) && items.length) {
+          apiHits++;
+          intercepted.push(...items.map(item => ({
+            name:        item.Name        || item.ProductName  || item.name        || '',
+            sku:         item.ItemNumber  || item.ProductNumber|| item.Sku         || item.sku         || '',
+            price:       parseFloat(item.Price?.MinPrice || item.MinPrice || item.Price || item.price  || 0) || null,
+            description: (item.Description|| item.description  || '').slice(0, 500),
+            category:    cat.dbCategory,
+            supplier:    item.SupplierName|| (item.Supplier&&item.Supplier.Name)   || item.supplier    || '',
+            images:      item.ImageUrl    ? [item.ImageUrl]
+                       : item.Images      ? item.Images.slice(0,2)
+                       : [],
+            colors:      Array.isArray(item.Colors) ? item.Colors.slice(0,20).join(',') : (item.colors||null),
+            sizes:       Array.isArray(item.Sizes)  ? item.Sizes.slice(0,20).join(',')  : (item.sizes ||null),
+            min_qty:     parseInt(item.MinQuantity || item.MinQty || 1) || 1,
+          })));
+        }
+      } catch {}
+    };
+    page.on('response', onResponse);
+
+    while (hasMore && catTotal < MAX_PER_CATEGORY) {
+      intercepted.length = 0;
+      apiHits = 0;
+
+      const searchUrl = `https://esp.asicentral.com/search?q=${encodeURIComponent(cat.search)}&page=${pageNum}&pageSize=100`;
+      await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(async () => {
+        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+      });
+      await page.waitForTimeout(SCRAPER_DELAY);
+
+      let products = [];
+
+      if (apiHits > 0 && intercepted.length > 0) {
+        // ✓ Fast path: got JSON from network interception
+        products = intercepted.slice();
+        log('info', `  [${cat.label}] p${pageNum}: ${products.length} products (API)`);
+      } else {
+        // Fallback: scrape the DOM
+        products = await page.evaluate((catLabel) => {
+          const selSets = [
+            '.product-tile', '.product-card', '.product-item', '[class*="ProductTile"]',
+            '[class*="product-tile"]', '[data-product-id]', '[data-item]', '.item-card', '.search-result-item'
+          ];
+          let els = [];
+          for (const s of selSets) { els = [...document.querySelectorAll(s)]; if (els.length) break; }
+          const txt = (...ss) => { for(const s of ss){const e=document.createTreeWalker&&els[0]&&els[0].querySelector(s); if(e?.textContent?.trim()) return e.textContent.trim();} return null; };
+          return els.map(el => {
+            const g = (...ss) => { for(const s of ss){const e=el.querySelector(s); if(e?.textContent?.trim()) return e.textContent.trim();} return ''; };
+            const img = el.querySelector('img[src]:not([src=""])')?.src || el.querySelector('img[data-src]')?.dataset?.src || '';
+            return {
+              name:        g('.product-name','.name','h3','h4','[class*="name"]','[class*="Name"]'),
+              sku:         g('.item-number','.product-number','.sku','[class*="ItemNumber"]','[class*="item-number"]','[class*="sku"]'),
+              price:       parseFloat(g('.price','.price-range','[class*="price"]','[class*="Price"]').replace(/[^0-9.]/g,'')) || null,
+              description: g('.description','.summary','[class*="description"]') || null,
+              category:    catLabel,
+              supplier:    g('.supplier-name','.company-name','[class*="supplier"]','[class*="Supplier"]'),
+              images:      img ? [img] : [],
+              colors:      null, sizes: null, min_qty: 1,
+            };
+          }).filter(p => p.name && p.name.length > 2);
+        }, cat.dbCategory).catch(() => []);
+        log('info', `  [${cat.label}] p${pageNum}: ${products.length} products (HTML fallback)`);
+      }
+
+      if (products.length === 0) { hasMore = false; break; }
+
+      const r = batchUpsert(vendor, products);
+      stats.added   += r.added;
+      stats.updated += r.updated;
+      stats.errors  += r.errors;
+      catTotal      += products.length;
+
+      // Detect next page
+      const hasNext = await page.evaluate(() => {
+        const n = document.querySelector('a[rel="next"],button[aria-label="Next"],[class*="pagination"] .next:not(.disabled),[class*="NextPage"]:not([disabled])');
+        return !!n && !n.disabled;
+      }).catch(() => false);
+
+      if (!hasNext || products.length < 10) hasMore = false;
+      else { pageNum++; await page.waitForTimeout(SCRAPER_DELAY); }
+    }
+
+    page.removeListener('response', onResponse);
+    log('info', `  [${cat.label}] done — ${catTotal} products pulled`);
+  }
+
+  await ctx.close();
+}
+
+// ─── GENERIC WEB SCRAPER (SanMar, Hanes, other vendors) ──────────────────────
+async function syncGenericWeb(vendor, creds, browser, stats) {
+  const ctx = await browser.newContext({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' });
+  const page = await ctx.newPage();
+  await page.goto(creds.login_url, { waitUntil: 'networkidle', timeout: 30000 });
+  if (creds.selector_username && creds.username) await page.fill(creds.selector_username, creds.username).catch(() => {});
+  if (creds.selector_password && creds.password) await page.fill(creds.selector_password, creds.password).catch(() => {});
+  if (creds.selector_submit)                     await page.click(creds.selector_submit).catch(() => {});
+  await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+
+  if (creds.catalog_url) {
+    await page.goto(creds.catalog_url, { waitUntil: 'networkidle', timeout: 30000 });
+    let hasMore = true, pageNum = 1;
+    while (hasMore && pageNum <= 200) {
+      await page.waitForTimeout(SCRAPER_DELAY);
+      const items = await page.evaluate(sel => {
+        const els = document.querySelectorAll(sel || '.product-item,.product,.item,[data-product-id]');
+        return Array.from(els).map(el => ({
+          name:        el.querySelector('.name,.title,.product-name,h2,h3')?.textContent?.trim(),
+          sku:         el.querySelector('.sku,.item-number,.product-number,[data-sku]')?.textContent?.trim(),
+          price:       parseFloat(el.querySelector('.price,[data-price]')?.textContent?.replace(/[^0-9.]/g,'')||0) || null,
+          description: el.querySelector('.description,.summary,p')?.textContent?.trim()?.slice(0,500),
+          images:      [el.querySelector('img[src]:not([src=""])')?.src].filter(Boolean),
+          category:    el.querySelector('.category,.product-category')?.textContent?.trim(),
+          supplier:    null, colors: null, sizes: null, min_qty: 1,
+        })).filter(p => p.name && p.name.length > 1);
+      }, creds.product_selector || null).catch(() => []);
+
+      if (!items.length) { hasMore = false; break; }
+      const r = batchUpsert(vendor, items);
+      stats.added += r.added; stats.updated += r.updated; stats.errors += r.errors;
+      const next = await page.$('a[rel="next"],.next-page,.pagination-next:not(.disabled)').catch(() => null);
+      if (next) { await next.click(); await page.waitForNavigation({ timeout: 10000 }).catch(() => {}); pageNum++; }
+      else hasMore = false;
+    }
+  }
+  await ctx.close();
+}
+
+// ─── SYNC DISPATCHER ─────────────────────────────────────────────────────────
+async function runSync(vendor) {
+  const logId = db.prepare("INSERT INTO vendor_sync_logs (vendor_id,status,started_at) VALUES (?,'running',datetime('now'))").run(vendor.id).lastInsertRowid;
+  const stats = { added: 0, updated: 0, removed: 0, errors: 0 };
+  let browser;
+  try {
+    if (!vendor.credentials_enc) throw new Error('No credentials saved — open vendor settings and add your login');
+    const creds = JSON.parse(dec(vendor.credentials_enc));
+    const { chromium } = require('playwright');
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process'],
+    });
+
+    if (['asi_web','asi_esp'].includes(vendor.type)) {
+      await syncASIEspPlus(vendor, creds, browser, stats);
+    } else {
+      await syncGenericWeb(vendor, creds, browser, stats);
+    }
+
     db.prepare("UPDATE vendor_sync_logs SET finished_at=datetime('now'),status='success',added=?,updated=?,removed=?,errors=?,duration_ms=CAST((julianday('now')-julianday(started_at))*86400000 AS INT) WHERE id=?")
-      .run(stats.added,stats.updated,stats.removed,stats.errors,logId);
+      .run(stats.added, stats.updated, stats.removed, stats.errors, logId);
     db.prepare("UPDATE vendors SET last_sync_at=datetime('now'),last_sync_status='success',total_products=(SELECT COUNT(*) FROM products WHERE vendor_id=?),sync_count=sync_count+1,connected=1 WHERE id=?")
-      .run(vendor.id,vendor.id);
-    db.prepare('INSERT INTO notifications (type,title,description) VALUES (?,?,?)').run('system',`Sync complete: ${vendor.name}`,`+${stats.added} new, ${stats.updated} updated`);
-    log('info',`Sync complete: ${vendor.name}`,JSON.stringify(stats));
-  }catch(e){
-    db.prepare("UPDATE vendor_sync_logs SET finished_at=datetime('now'),status='error',errors=1,message=? WHERE id=?").run(e.message,logId);
-    log('error',`Sync failed: ${vendor.name}`,e.message);
-  }finally{if(browser)await browser.close();}
+      .run(vendor.id, vendor.id);
+    db.prepare('INSERT INTO notifications (type,title,description) VALUES (?,?,?)')
+      .run('system', `Sync complete: ${vendor.name}`, `+${stats.added} new, ${stats.updated} updated, ${stats.errors} errors`);
+    log('info', `Sync complete: ${vendor.name}`, JSON.stringify(stats));
+  } catch(e) {
+    db.prepare("UPDATE vendor_sync_logs SET finished_at=datetime('now'),status='error',errors=1,message=? WHERE id=?").run(e.message, logId);
+    db.prepare("UPDATE vendors SET last_sync_status='error' WHERE id=?").run(vendor.id);
+    log('error', `Sync failed: ${vendor.name}`, e.message);
+  } finally {
+    if (browser) await browser.close();
+  }
   return stats;
 }
 
