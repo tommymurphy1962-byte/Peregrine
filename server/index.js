@@ -128,7 +128,7 @@ app.post('/api/auth/staff/login', (req,res) => {
   const u = db.prepare('SELECT * FROM staff_users WHERE email=? AND active=1').get(email.toLowerCase().trim());
   if (!u || !bcrypt.compareSync(password, u.password_hash))
     return res.status(401).json({ error:'Invalid email or password' });
-  db.prepare('UPDATE staff_users SET last_login=datetime('now') WHERE id=?').run(u.id);
+  db.prepare("UPDATE staff_users SET last_login=datetime('now') WHERE id=?").run(u.id);
   const { password_hash, ...safe } = u;
   log('info', `Login: ${email}`);
   res.json({ token:sign({ userId:u.id, userType:'staff', role:u.role, locationId:u.location_id }), user:safe });
@@ -142,7 +142,7 @@ app.post('/api/auth/customer/login', (req,res) => {
   const u = db.prepare(q).get(...[email?.toLowerCase().trim(), subdomain].filter(Boolean));
   if (!u || !bcrypt.compareSync(password, u.password_hash))
     return res.status(401).json({ error:'Invalid email or password' });
-  db.prepare('UPDATE customer_users SET last_login=datetime('now') WHERE id=?').run(u.id);
+  db.prepare("UPDATE customer_users SET last_login=datetime('now') WHERE id=?").run(u.id);
   const { password_hash, ...safe } = u;
   res.json({ token:sign({ userId:u.id, userType:'customer', customerId:u.customer_id }), user:safe });
 });
@@ -204,7 +204,7 @@ app.put('/api/orders/:id', authMW, staffOnly, (req,res) => {
   if (internal_notes!==undefined) db.prepare(`UPDATE orders SET internal_notes=? WHERE id=?`).run(internal_notes,req.params.id);
   if (tracking?.tracking_number) {
     const ex = db.prepare('SELECT id FROM order_tracking WHERE order_id=?').get(req.params.id);
-    if (ex) db.prepare('UPDATE order_tracking SET carrier=?,tracking_number=?,eta=?,entered_at=datetime('now') WHERE order_id=?').run(tracking.carrier,tracking.tracking_number,tracking.eta,req.params.id);
+    if (ex) db.prepare("UPDATE order_tracking SET carrier=?,tracking_number=?,eta=?,entered_at=datetime('now') WHERE order_id=?").run(tracking.carrier,tracking.tracking_number,tracking.eta,req.params.id);
     else    db.prepare('INSERT INTO order_tracking (order_id,carrier,tracking_number,eta,entered_by) VALUES (?,?,?,?,?)').run(req.params.id,tracking.carrier,tracking.tracking_number,tracking.eta,req.user.userId);
     db.prepare('INSERT INTO notifications (type,title,description) VALUES (?,?,?)').run('shipping',`Tracking added to ${req.params.id}`,tracking.tracking_number);
   }
@@ -263,7 +263,7 @@ app.get('/api/products/categories', authMW, (req,res) =>
 app.put('/api/products/pricing/:cId/:pId', authMW, staffOnly, adminOnly, (req,res) => {
   const {markup_type,markup_value,sale_price,setup_fee,shipping_cost}=req.body;
   const ex=db.prepare('SELECT id FROM customer_pricing WHERE customer_id=? AND product_id=?').get(req.params.cId,req.params.pId);
-  if(ex) db.prepare('UPDATE customer_pricing SET markup_type=?,markup_value=?,sale_price=?,setup_fee=?,shipping_cost=?,updated_at=datetime('now') WHERE id=?')
+  if(ex) db.prepare("UPDATE customer_pricing SET markup_type=?,markup_value=?,sale_price=?,setup_fee=?,shipping_cost=?,updated_at=datetime('now') WHERE id=?")
     .run(markup_type||'pct',markup_value||0,sale_price||null,setup_fee||0,shipping_cost||0,ex.id);
   else db.prepare('INSERT INTO customer_pricing (customer_id,product_id,markup_type,markup_value,sale_price,setup_fee,shipping_cost) VALUES (?,?,?,?,?,?,?)')
     .run(req.params.cId,req.params.pId,markup_type||'pct',markup_value||0,sale_price||null,setup_fee||0,shipping_cost||0);
@@ -316,7 +316,7 @@ app.put('/api/customers/:id', authMW, staffOnly, adminOnly, (req,res) => {
 app.put('/api/customers/:id/branding', authMW, staffOnly, adminOnly, (req,res) => {
   const {primary_color,secondary_color,accent_color,font_family,template,logo_text,logo_url}=req.body;
   const ex=db.prepare('SELECT id FROM customer_branding WHERE customer_id=?').get(req.params.id);
-  if(ex) db.prepare('UPDATE customer_branding SET primary_color=?,secondary_color=?,accent_color=?,font_family=?,template=?,logo_text=?,logo_url=?,updated_at=datetime('now') WHERE customer_id=?')
+  if(ex) db.prepare("UPDATE customer_branding SET primary_color=?,secondary_color=?,accent_color=?,font_family=?,template=?,logo_text=?,logo_url=?,updated_at=datetime('now') WHERE customer_id=?")
     .run(primary_color,secondary_color,accent_color,font_family,template,logo_text,logo_url,req.params.id);
   else db.prepare('INSERT INTO customer_branding (customer_id,primary_color,secondary_color,accent_color,font_family,template,logo_text,logo_url) VALUES (?,?,?,?,?,?,?,?)')
     .run(req.params.id,primary_color,secondary_color,accent_color,font_family,template,logo_text,logo_url);
@@ -483,7 +483,7 @@ app.get('/api/tags', authMW, staffOnly, (req,res) => {
 app.put('/api/tags/:provider', authMW, staffOnly, adminOnly, (req,res) => {
   const {tag_id,tag_name,snippet,active,customer_id=null}=req.body;
   const ex=db.prepare('SELECT id FROM customer_tags WHERE provider=? AND customer_id IS ?').get(req.params.provider,customer_id);
-  if(ex) db.prepare('UPDATE customer_tags SET tag_id=?,tag_name=?,snippet=?,active=?,updated_at=datetime('now') WHERE id=?').run(tag_id,tag_name,snippet,active?1:0,ex.id);
+  if(ex) db.prepare("UPDATE customer_tags SET tag_id=?,tag_name=?,snippet=?,active=?,updated_at=datetime('now') WHERE id=?").run(tag_id,tag_name,snippet,active?1:0,ex.id);
   else db.prepare('INSERT INTO customer_tags (customer_id,provider,tag_id,tag_name,snippet,active) VALUES (?,?,?,?,?,?)').run(customer_id,req.params.provider,tag_id,tag_name,snippet,active?1:0);
   res.json({success:true});
 });
