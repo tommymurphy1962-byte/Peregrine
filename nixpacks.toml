@@ -1,9 +1,10 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "chromium", "nss", "atk", "cups", "libxkbcommon", "pango", "cairo", "glib"]
+nixPkgs = ["nodejs_20", "nss", "atk", "cups", "libxkbcommon", "pango", "cairo", "glib", "alsa-lib", "mesa"]
 
 [phases.install]
 cmds = [
   "npm install",
+  "npx playwright install chromium",
   "cd frontend && npm install && npm run build && cd .."
 ]
 
@@ -14,6 +15,5 @@ cmds = ["node server/db-init.js"]
 cmd = "node server/index.js"
 
 [variables]
-PLAYWRIGHT_BROWSERS_PATH = "/usr/bin"
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
 NODE_ENV = "production"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "0"

@@ -1639,13 +1639,11 @@ function VendorSync() {
   const intervals   = useRef({});
 
   const CRED_DEFAULTS = {
-    asi_web:    {login_url:'https://esp.asicentral.com/',username:'',password:''},
-    asi_api:    {api_key:'',member_id:'',base_url:'https://api.asicentral.com/v1/'},
-    sanmar:     {api_key:'',account_id:'',endpoint:'https://api.sanmar.com/promostandards/'},
-    sns:        {api_key:'',account_id:'',endpoint:'https://api.ssactivewear.com/v2/'},
-    alphabroder:{api_key:'',account_id:'',endpoint:''},
-    custom_web: {login_url:'',username:'',password:'',selector_username:'',selector_password:'',selector_submit:''},
-    custom_api: {endpoint:'',api_key:'',account_id:''},
+    asi_web:    {login_url:'https://esp.asicentral.com/', username:'', password:''},
+    sanmar:     {login_url:'https://www.sanmar.com/',     username:'', password:''},
+    sns:        {login_url:'https://www.ssactivewear.com/', username:'', password:''},
+    alphabroder:{login_url:'https://www.alphabroder.com/', username:'', password:''},
+    custom_web: {login_url:'', username:'', password:''},
   };
 
   const mapV = r => ({
